@@ -1,5 +1,7 @@
 .env
 storage/PrivateNut.pem
+storage/thumbnails/*
+storage/assets/*
 PrivateNut.pem
 public_key.pem
 public/SignedV1.apk
