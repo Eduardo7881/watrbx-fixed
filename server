@@ -1,3 +1,3 @@
 #!/usr/bin/bash
 
-php -S 0.0.0.0:8080 -t public router.php
+php -S 0.0.0.0:8080 -t ~/watrbx-main/public ~/watrbx-main/router.php

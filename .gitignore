@@ -1,7 +1,5 @@
 .env
-composer.lock
 storage/PrivateNut.pem
-vendor
 PrivateNut.pem
 public_key.pem
 public/SignedV1.apk

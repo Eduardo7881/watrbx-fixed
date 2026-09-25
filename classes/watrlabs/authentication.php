@@ -371,7 +371,7 @@ class authentication {
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_HEADER, false);
         $ipwhois = json_decode(curl_exec($ch), true);
-        curl_close($ch);
+        //curl_close($ch);
 
         return $ipwhois;
     }
