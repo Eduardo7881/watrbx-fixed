@@ -1,16 +1,14 @@
-#!/usr/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
+
 set -e
 
 PROJECT_DIR="${1:-.}"
-KEY_FILE="$PROJECT_DIR/storage/PrivateNut.pem"
 
-mkdir -p "$PROJECT_DIR/storage"
+STORAGE_DIR="$PROJECT_DIR/storage"
+PRIVATE_KEY="$STORAGE_DIR/PrivateNut.pem"
+PUBLIC_KEY="$PROJECT_DIR/public_key.pem"
 
-if [ -f "$KEY_FILE" ]; then
-    echo "PrivateNut.pem already exists:"
-    echo "$KEY_FILE"
-    exit 0
-fi
+mkdir -p "$STORAGE_DIR"
 
 if ! command -v openssl >/dev/null 2>&1; then
     echo "OpenSSL is not installed."
@@ -18,12 +16,33 @@ if ! command -v openssl >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Generating PrivateNut.pem..."
+if [ -f "$PRIVATE_KEY" ] || [ -f "$PUBLIC_KEY" ]; then
+    echo "A key file already exists."
+    echo "Private key: $PRIVATE_KEY"
+    echo "Public key:  $PUBLIC_KEY"
+    echo "No files were changed."
+    exit 1
+fi
 
-openssl genrsa -out "$KEY_FILE" 2048
+echo "Generating RSA private key..."
 
-chmod 600 "$KEY_FILE"
+openssl genrsa \
+    -out "$PRIVATE_KEY" \
+    2048
+
+echo "Generating matching RSA public key..."
+
+openssl rsa \
+    -in "$PRIVATE_KEY" \
+    -pubout \
+    -out "$PUBLIC_KEY"
+
+chmod 600 "$PRIVATE_KEY"
+chmod 644 "$PUBLIC_KEY"
 
 echo
-echo "PrivateNut.pem generated successfully:"
-echo "$KEY_FILE"
+echo "Key pair generated successfully."
+echo
+echo "Private key: $PRIVATE_KEY"
+echo "Public key:  $PUBLIC_KEY"
+echo
