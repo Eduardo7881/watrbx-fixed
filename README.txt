@@ -1,33 +1,34 @@
-WatrBX Admin Panel Plugin
-=========================
+WatrBX Admin Classic Plus - Backend Command Expansion
 
-This addon extends the existing local WatrBX admin panel. It does not replace the whole WatrBX project.
+This addon keeps the existing Admin Panel and its existing routes/UI.
+It does NOT replace the panel with a new top navigation bar.
 
-Install from the WatrBX project root:
+The added ADMIN COMMAND TOOLKIT is placed in routes/webhandler.php near the
+existing admin command routes. It adds backend actions including:
 
-  unzip -o watrbx-admin-plus.zip
+- User search JSON endpoint
+- Password reset
+- Force logout / session revocation
+- Clear inventory
+- Remove friendship/request
+- Broadcast private message
+- Site feed announcements
+- Feed pruning
+- Expired session/captcha cleanup
+- Log pruning
+- Bulk asset property editing
+- Reset asset sales
+- Clear asset votes
+- Universe editing
+- Universe deletion + visit/badge cleanup
+- Job stop/reset/delete
+- API key revocation
+- Server registry removal
+- Account-state reset
 
-The archive contains:
-  routes/webhandler.php
-  routes/clienthandler.php
-  classes/watrbx/thumbnails.php
-  views/admin.php
+Existing Admin Classic Plus functionality is preserved.
 
-Open:
-  http://127.0.0.1:8080/admin
+Install from the project root:
+  unzip -o watrbx-admin-classic-plus-command-expansion.zip
 
-Features:
-- Dashboard counters
-- Search users by username/ID
-- Grant ROBUX and Tix
-- Set Builders Club membership
-- Grant/revoke admin permission
-- Grant catalog assets to users
-- Warnings and timed bans using the existing moderation table
-- Send messages as the logged-in admin
-- Delete users and their owned items/messages/moderation records
-- Create catalog assets with local asset + thumbnail uploads
-- Limited / Limited Unique / Featured / remaining fields
-- Delete catalog assets and their local files/thumbnails
-
-Requires the existing WatrBX database schema. No SQL migration is required.
+Then restart the PHP server.

@@ -12,4 +12,9 @@ You still need to find the api server (that handles joining, etc.)
 | Note:  Do not update using `composer update` since it breaks the fixes for Pixie.
 2. Run `./init.sh` for first-time setup (dont run it again after you already ran it)
 3. Run `./start.sh` to start the server.
-4. profit
+4. Run `./start-db.sh` to start the MariaDB server.
+5. profit
+
+# To shutdown:
+- Stop PHP server (`pkill php`)
+- Stop MariaDB server (`mysqladmin -u <DATABASE_USER> shutdown && pkill mariadbd && pkill mysqld`)
