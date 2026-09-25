@@ -9,6 +9,26 @@ $router->get('/Game/Join2014.ashx', function(){
     die();
 });
 
+$router->get('/Thumbs/Local.ashx', function(){
+    $id = isset($_GET["assetId"]) ? (int)$_GET["assetId"] : 0;
+    global $db;
+    $thumb = $db->table("thumbnails")->where("assetid", $id)->where("mode", "local")->first();
+    if (!$thumb || strpos($thumb->file, "local:") !== 0) {
+        http_response_code(404);
+        die();
+    }
+    $path = dirname(__DIR__) . "/storage/thumbnails/" . substr($thumb->file, 6);
+    if (!is_file($path)) {
+        http_response_code(404);
+        die();
+    }
+    $mime = function_exists("mime_content_type") ? mime_content_type($path) : "image/png";
+    header("Content-Type: " . $mime);
+    header("Cache-Control: public, max-age=86400");
+    readfile($path);
+    die();
+});
+
 $router->get('/Asset/', function() {
         
     if(isset($_GET["id"])){
@@ -25,6 +45,14 @@ $router->get('/Asset/', function() {
         $asset = $db->table("assets")->where("id", $id)->first();
 
         if($asset !== null){
+            $localPath = dirname(__DIR__) . "/storage/assets/" . basename($asset->fileid);
+            if(is_file($localPath)) {
+                $mime = function_exists("mime_content_type") ? mime_content_type($localPath) : "application/octet-stream";
+                header("Content-Type: " . $mime);
+                header("Cache-Control: public, max-age=86400");
+                readfile($localPath);
+                die();
+            }
             header("Location: http://c0.watrbx.xyz/" . $asset->fileid);
             die();
         } else {
@@ -76,6 +104,14 @@ $router->get('/asset/', function() {
         $asset = $db->table("assets")->where("id", $id)->first();
 
         if($asset !== null){
+            $localPath = dirname(__DIR__) . "/storage/assets/" . basename($asset->fileid);
+            if(is_file($localPath)) {
+                $mime = function_exists("mime_content_type") ? mime_content_type($localPath) : "application/octet-stream";
+                header("Content-Type: " . $mime);
+                header("Cache-Control: public, max-age=86400");
+                readfile($localPath);
+                die();
+            }
             header("Location: http://c0.watrbx.xyz/" . $asset->fileid);
             die();
         } else {

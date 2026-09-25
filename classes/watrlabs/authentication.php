@@ -64,7 +64,7 @@ class authentication {
                 'expiration' => $expiration
             );
             $insertId = $db->table('sessions')->insert($data);
-            setcookie(".ROBLOSECURITY", $session, $expiration, "/", ".watrbx.xyz");
+            setcookie(".ROBLOSECURITY", $session, $expiration, "/");
         } else {
 
             $data = array(
@@ -75,7 +75,7 @@ class authentication {
                 'expiration' => $expiration
             );
             $insertId = $db->table('sessions')->insert($data);
-            setcookie(".ROBLOSECURITY", $session, $expiration, '/', '.watrbx.xyz');
+            setcookie(".ROBLOSECURITY", $session, $expiration, '/');
         }
         
         return $session;

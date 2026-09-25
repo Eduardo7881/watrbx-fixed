@@ -117,6 +117,96 @@ $router->get('/Membership/NotApproved.aspx', function(){
     $page::get_template("membership/notapproved");
 });
 
+
+$router->get('/admin', function() {
+    $auth = new authentication();
+    $auth->requiresession();
+    $admin = $auth->getuserinfo();
+    if (!$admin || (int)$admin->is_admin !== 1) {
+        http_response_code(403);
+        die('403 - Admin access required.');
+    }
+    $page = new pagebuilder;
+    $page::get_template('admin');
+});
+
+$adminGuard = function() {
+    $auth = new authentication();
+    $auth->requiresession();
+    $admin = $auth->getuserinfo();
+    if (!$admin || (int)$admin->is_admin !== 1) { http_response_code(403); die("403 - Admin access required."); }
+    return $admin;
+};
+
+$adminRedirect = function($message = null, $error = null) {
+    $params = [];
+    if ($message !== null) $params['message'] = $message;
+    if ($error !== null) $params['error'] = $error;
+    header('Location: /admin' . ($params ? '?' . http_build_query($params) : ''));
+    die();
+};
+
+$router->post('/admin/grant-currency', function() use ($adminGuard, $adminRedirect) {
+    global $db; $adminGuard();
+    $userid=(int)($_POST['userid']??0); $robux=(int)($_POST['robux']??0); $tix=(int)($_POST['tix']??0);
+    $user=$db->table('users')->where('id',$userid)->first();
+    if(!$user || $robux<0 || $tix<0 || ($robux===0 && $tix===0)) $adminRedirect(null,'Invalid user or amount.');
+    $db->table('users')->where('id',$userid)->update(['robux'=>(int)$user->robux+$robux,'tix'=>(int)$user->tix+$tix]);
+    $adminRedirect('Currency granted to '.$user->username.'.');
+});
+
+$router->post('/admin/set-membership', function() use ($adminGuard, $adminRedirect) {
+    global $db; $adminGuard(); $userid=(int)($_POST['userid']??0); $membership=$_POST['membership']??'None';
+    $allowed=['None','BuildersClub','TurboBuildersClub','OutrageousBuildersClub'];
+    if(!in_array($membership,$allowed,true)) $adminRedirect(null,'Invalid membership.');
+    $user=$db->table('users')->where('id',$userid)->first(); if(!$user) $adminRedirect(null,'User not found.');
+    $db->table('users')->where('id',$userid)->update(['membership'=>$membership]); $adminRedirect('Membership updated for '.$user->username.'.');
+});
+
+$router->post('/admin/set-admin', function() use ($adminGuard, $adminRedirect) {
+    global $db; $admin=$adminGuard(); $userid=(int)($_POST['userid']??0); $isAdmin=(int)($_POST['is_admin']??0);
+    if($userid===(int)$admin->id && $isAdmin===0) $adminRedirect(null,'You cannot remove your own admin permission from this panel.');
+    $user=$db->table('users')->where('id',$userid)->first(); if(!$user) $adminRedirect(null,'User not found.');
+    $db->table('users')->where('id',$userid)->update(['is_admin'=>$isAdmin?1:0]); $adminRedirect('Admin permission updated.');
+});
+
+$router->post('/admin/grant-asset', function() use ($adminGuard, $adminRedirect) {
+    global $db; $adminGuard(); $userid=(int)($_POST['userid']??0); $assetid=(int)($_POST['assetid']??0);
+    $user=$db->table('users')->where('id',$userid)->first(); $asset=$db->table('assets')->where('id',$assetid)->first();
+    if(!$user || !$asset) $adminRedirect(null,'User or asset not found.');
+    $owned=$db->table('ownedassets')->where('userid',$userid)->where('assetid',$assetid)->first();
+    if($owned) $adminRedirect(null,'User already owns this asset.');
+    $db->table('ownedassets')->insert(['userid'=>$userid,'assetid'=>$assetid,'time'=>time()]); $adminRedirect('Granted asset #'.$assetid.' to '.$user->username.'.');
+});
+
+$router->post('/admin/moderate', function() use ($adminGuard, $adminRedirect) {
+    global $db; $adminGuard(); $userid=(int)($_POST['userid']??0); $action=$_POST['action']??'warning'; $days=max(1,min(3650,(int)($_POST['days']??1))); $note=trim($_POST['note']??'');
+    $user=$db->table('users')->where('id',$userid)->first(); if(!$user || $note==='') $adminRedirect(null,'User and moderation note are required.');
+    $isBan=$action==='ban';
+    $db->table('moderation')->insert(['userid'=>$userid,'type'=>$isBan?'days':'warning','reviewed'=>0,'banneduntil'=>$isBan?time()+($days*86400):time(),'moderatornote'=>substr($note,0,255),'offensiveitem'=>null,'days'=>$isBan?$days:null,'canignore'=>$isBan?0:1]);
+    $adminRedirect($isBan?'User banned for '.$days.' day(s).':'Warning added to '.$user->username.'.');
+});
+
+$router->post('/admin/send-message', function() use ($adminGuard, $adminRedirect) {
+    global $db; $admin=$adminGuard(); $userid=(int)($_POST['userid']??0); $subject=trim($_POST['subject']??''); $body=trim($_POST['body']??'');
+    $user=$db->table('users')->where('id',$userid)->first(); if(!$user || $subject==='' || $body==='') $adminRedirect(null,'Recipient, subject and body are required.');
+    $db->table('messages')->insert(['userfrom'=>(int)$admin->id,'userto'=>$userid,'subject'=>htmlspecialchars($subject,ENT_QUOTES|ENT_HTML5,'UTF-8'),'body'=>htmlspecialchars($body,ENT_QUOTES|ENT_HTML5,'UTF-8'),'date'=>time(),'hasread'=>0]);
+    $adminRedirect('Message sent to '.$user->username.'.');
+});
+
+$router->post('/admin/delete-user', function() use ($adminGuard, $adminRedirect) {
+    global $db; $admin=$adminGuard(); $userid=(int)($_POST['userid']??0); if($userid===(int)$admin->id) $adminRedirect(null,'You cannot delete yourself.');
+    $user=$db->table('users')->where('id',$userid)->first(); if(!$user) $adminRedirect(null,'User not found.');
+    $db->table('ownedassets')->where('userid',$userid)->delete(); $db->table('messages')->where('userfrom',$userid)->delete(); $db->table('messages')->where('userto',$userid)->delete(); $db->table('moderation')->where('userid',$userid)->delete(); $db->table('users')->where('id',$userid)->delete();
+    $adminRedirect('Deleted user '.$user->username.'.');
+});
+
+$router->post('/admin/delete-asset', function() use ($adminGuard, $adminRedirect) {
+    global $db; $adminGuard(); $assetid=(int)($_POST['assetid']??0); $asset=$db->table('assets')->where('id',$assetid)->first(); if(!$asset) $adminRedirect(null,'Asset not found.');
+    $db->table('ownedassets')->where('assetid',$assetid)->delete(); $db->table('thumbnails')->where('assetid',$assetid)->delete(); $path=dirname(__DIR__).'/storage/assets/'.basename($asset->fileid); if(is_file($path)) @unlink($path); $db->table('assets')->where('id',$assetid)->delete();
+    $adminRedirect('Deleted asset #'.$assetid.'.');
+});
+
 $router->get('/{slug}-item', function($thing){
     $router = new Routing();
 

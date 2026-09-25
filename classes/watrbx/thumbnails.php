@@ -17,6 +17,9 @@ class thumbnails {
 
         $thumb = $db->table("thumbnails")->where("assetid", $id)->where("dimensions", $size)->first();
         if($thumb !== null){
+            if(isset($thumb->mode) && $thumb->mode === "local" && strpos($thumb->file, "local:") === 0){
+                return "/Thumbs/Local.ashx?assetId=" . (int)$id;
+            }
             return "//c0.watrbx.xyz/" . $thumb->file;
         } else {
             $this->request_asset_thumbnail($id);
