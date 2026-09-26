@@ -73,11 +73,25 @@ read -r -s -p "Database password [empty]: " DB_PASS
 printf "\n"
 
 # Test the configured connection first. If it is unavailable, offer to start the local MariaDB server.
+DB_SOCKET="${PREFIX:-$HOME}/var/run/mysqld.sock"
+DB_DATADIR="${PREFIX:-$HOME}/var/lib/mysql"
+
+# Connect using the configured TCP connection. If the local MariaDB installation
+# uses socket authentication for root, fall back to the local socket.
 db_test(){
     if [[ -n "$DB_PASS" ]]; then
         "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e 'SELECT 1' >/dev/null 2>&1
     else
         "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e 'SELECT 1' >/dev/null 2>&1
+    fi
+}
+
+db_socket_test(){
+    [[ -S "$DB_SOCKET" ]] || return 1
+    if [[ -n "$DB_PASS" ]]; then
+        "$DBCLI" --socket="$DB_SOCKET" -u "$DB_USER" -p"$DB_PASS" -e 'SELECT 1' >/dev/null 2>&1
+    else
+        "$DBCLI" --socket="$DB_SOCKET" -u "$DB_USER" -e 'SELECT 1' >/dev/null 2>&1
     fi
 }
 
@@ -89,50 +103,115 @@ db_exec(){
     fi
 }
 
+db_socket_exec(){
+    if [[ -n "$DB_PASS" ]]; then
+        "$DBCLI" --socket="$DB_SOCKET" -u "$DB_USER" -p"$DB_PASS" "$@"
+    else
+        "$DBCLI" --socket="$DB_SOCKET" -u "$DB_USER" "$@"
+    fi
+}
+
 if ! db_test; then
-    warn "MariaDB is not responding on $DB_HOST:$DB_PORT."
-    if command -v mysqld >/dev/null 2>&1 && command -v mysqld_safe >/dev/null 2>&1; then
-        read -r -p "Start MariaDB automatically with mysqld_safe? [Y/n]: " START_DB
+    # A Termux MariaDB installation may already be running with socket-only
+    # authentication for root. Detect that before attempting to start another
+    # mariadbd instance.
+    EXISTING_SOCKET=""
+    if [[ -n "$DB_PASS" ]]; then
+        EXISTING_SOCKET="$($DBCLI -u "$DB_USER" -p"$DB_PASS" -N -s -e 'SELECT @@socket' 2>/dev/null || true)"
+    else
+        EXISTING_SOCKET="$($DBCLI -u "$DB_USER" -N -s -e 'SELECT @@socket' 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$EXISTING_SOCKET" && -S "$EXISTING_SOCKET" ]]; then
+        DB_SOCKET="$EXISTING_SOCKET"
+        DB_READY=2
+        warn "MariaDB is already running through socket $DB_SOCKET."
+    else
+        DB_READY=0
+    fi
+
+    if [[ "$DB_READY" == "0" ]]; then
+        warn "MariaDB is not responding on $DB_HOST:$DB_PORT."
+    if command -v mariadbd >/dev/null 2>&1 || command -v mysqld >/dev/null 2>&1; then
+        read -r -p "Start MariaDB automatically? [Y/n]: " START_DB
         START_DB="${START_DB:-Y}"
         if [[ "$START_DB" =~ ^[Yy]$ ]]; then
-            DATADIR="${PREFIX:-$HOME/var/lib/mysql}"
-            if [[ -n "${PREFIX:-}" ]]; then
-                DATADIR="$PREFIX/var/lib/mysql"
+            MARIADBD_BIN=""
+            if command -v mariadbd >/dev/null 2>&1; then
+                MARIADBD_BIN="$(command -v mariadbd)"
+            else
+                MARIADBD_BIN="$(command -v mysqld)"
             fi
-            mkdir -p "$DATADIR"
 
-            if [[ ! -d "$DATADIR/mysql" ]]; then
+            mkdir -p "$DB_DATADIR" "$(dirname "$DB_SOCKET")"
+            if [[ ! -d "$DB_DATADIR/mysql" ]]; then
                 info "Initializing MariaDB data directory..."
-                mariadb-install-db --datadir="$DATADIR" >"$DB_LOG" 2>&1 || {
-                    sed -n '1,80p' "$DB_LOG"
+                mariadb-install-db --datadir="$DB_DATADIR" >"$DB_LOG" 2>&1 || {
+                    cat "$DB_LOG"
                     die "MariaDB data directory initialization failed."
                 }
             fi
 
+            rm -f "$DB_SOCKET"
             info "Starting MariaDB..."
-            mysqld_safe --datadir="$DATADIR" >"$DB_LOG" 2>&1 &
+            "$MARIADBD_BIN" \
+                --datadir="$DB_DATADIR" \
+                --socket="$DB_SOCKET" \
+                --port="$DB_PORT" \
+                --bind-address="$DB_HOST" \
+                --pid-file="$PROJECT_DIR/storage/mariadb.pid" \
+                --log-error="$DB_LOG" \
+                > /dev/null 2>&1 &
             DB_PID=$!
 
             DB_READY=0
-            for _ in {1..30}; do
+            for _ in {1..60}; do
                 if db_test; then
                     DB_READY=1
+                    break
+                fi
+                if db_socket_test; then
+                    DB_READY=2
+                    break
+                fi
+                if ! kill -0 "$DB_PID" 2>/dev/null; then
                     break
                 fi
                 sleep 1
             done
 
-            if [[ "$DB_READY" != "1" ]]; then
+            if [[ "$DB_READY" == "0" ]]; then
                 printf '\n'
-                sed -n '1,120p' "$DB_LOG" 2>/dev/null || true
+                cat "$DB_LOG" 2>/dev/null || true
                 die "MariaDB failed to start. Full log: $DB_LOG"
             fi
+
             ok "MariaDB started."
         else
             die "Start MariaDB first, then run this setup again."
         fi
     else
-        die "MariaDB is not running and mysqld_safe was not found."
+        die "MariaDB is not running and no MariaDB server binary was found."
+    fi
+    fi
+fi
+
+# If MariaDB was found through a socket, configure the requested local TCP
+# account before continuing. This also fixes fresh Termux installs where root
+# is initially authenticated only through unix_socket.
+if [[ "${DB_READY:-0}" == "2" ]]; then
+    if [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
+        info "Configuring the local database user for TCP access..."
+        if [[ -n "$DB_PASS" ]]; then
+            SOCKET_PASS_SQL="$(sql_quote "$DB_PASS")"
+        else
+            SOCKET_PASS_SQL=""
+        fi
+        db_socket_exec -e "CREATE USER IF NOT EXISTS '$(sql_quote "$DB_USER")'@'127.0.0.1' IDENTIFIED BY '$SOCKET_PASS_SQL'; ALTER USER '$(sql_quote "$DB_USER")'@'127.0.0.1' IDENTIFIED BY '$SOCKET_PASS_SQL'; GRANT ALL PRIVILEGES ON *.* TO '$(sql_quote "$DB_USER")'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null
+        db_test || die "MariaDB is running, but TCP login for $DB_USER failed."
+        ok "MariaDB TCP access is ready."
+    else
+        die "MariaDB is reachable only through its local socket, but the configured host is $DB_HOST."
     fi
 fi
 
