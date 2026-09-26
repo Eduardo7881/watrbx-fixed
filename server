@@ -2,4 +2,4 @@
 
 #mysqladmin -u root shutdown
 #mysqld_safe --datadir=$PREFIX/var/lib/mysql
-php -S 0.0.0.0:8080 -t ~/watrbx-main/public ~/watrbx-main/router.php
+php -S 0.0.0.0:8080 -t ./public ./router.php
