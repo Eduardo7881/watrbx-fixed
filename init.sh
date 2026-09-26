@@ -1,15 +1,27 @@
 #!/data/data/com.termux/files/usr/bin/bash
-set -euo pipefail
 
 # WatrBX first-time setup for Termux/Linux.
 # Run from the WatrBX project directory or pass the project directory as $1.
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
+set -euo pipefail
 
 RESET='\033[0m'; BOLD='\033[1m'; CYAN='\033[36m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'
 info(){ printf "${CYAN}==>${RESET} %s\n" "$*"; }
 ok(){ printf "${GREEN}[OK]${RESET} %s\n" "$*"; }
 warn(){ printf "${YELLOW}[!]${RESET} %s\n" "$*"; }
 die(){ printf "${RED}[ERROR]${RESET} %s\n" "$*" >&2; exit 1; }
-prompt(){ local var="$1" text="$2" default="${3:-}"; if [[ -n "$default" ]]; then read -r -p "$text [$default]: " "$var"; [[ -z "${!var}" ]] && printf -v "$var" '%s' "$default"; else read -r -p "$text: " "$var"; fi; }
+
+# Escape a value for use inside a single-quoted SQL string.
+sql_quote(){
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\'/\'\'}
+    printf '%s' "$value"
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${1:-$PWD}"
@@ -25,41 +37,21 @@ printf "This wizard configures a fresh/local WatrBX installation.\n\n"
 command -v php >/dev/null 2>&1 || die "PHP is not installed. Install it with: pkg install php"
 command -v openssl >/dev/null 2>&1 || die "OpenSSL is not installed. Install it with: pkg install openssl"
 DBCLI=""
-if command -v mariadb >/dev/null 2>&1; then DBCLI="mariadb"; elif command -v mysql >/dev/null 2>&1; then DBCLI="mysql"; else die "MariaDB client is not installed. Install it with: pkg install mariadb"; fi
+if command -v mariadb >/dev/null 2>&1; then
+    DBCLI="mariadb"
+elif command -v mysql >/dev/null 2>&1; then
+    DBCLI="mysql"
+else
+    die "MariaDB client is not installed. Install it with: pkg install mariadb"
+fi
 ok "PHP: $(php -r 'echo PHP_VERSION;')"
 ok "OpenSSL: $(openssl version | head -1)"
 ok "Database client: $($DBCLI --version | head -1)"
 
 cd "$PROJECT_DIR"
-
-# Database server detection / optional start.
-if ! "$DBCLI" -u root -e 'SELECT 1' >/dev/null 2>&1; then
-    warn "MariaDB is not responding on the default local socket."
-    if command -v mysqld >/dev/null 2>&1 && command -v mysqld_safe >/dev/null 2>&1; then
-        read -r -p "Start MariaDB automatically with mysqld_safe? [Y/n]: " START_DB
-        START_DB="${START_DB:-Y}"
-        if [[ "$START_DB" =~ ^[Yy]$ ]]; then
-            DATADIR="${PREFIX:-$HOME}/var/lib/mysql"
-            mkdir -p "$DATADIR"
-            if [[ ! -d "$DATADIR/mysql" ]]; then
-                info "Initializing MariaDB data directory..."
-                mariadb-install-db --datadir="$DATADIR" >/dev/null
-            fi
-            mysqld_safe --datadir="$DATADIR" >/tmp/watrbx-mysqld.log 2>&1 &
-            DB_PID=$!
-            for _ in {1..20}; do
-                if "$DBCLI" -u root -e 'SELECT 1' >/dev/null 2>&1; then break; fi
-                sleep 1
-            done
-            "$DBCLI" -u root -e 'SELECT 1' >/dev/null 2>&1 || die "MariaDB failed to start. Check /tmp/watrbx-mysqld.log"
-            ok "MariaDB started."
-        else
-            die "Start MariaDB first, then run this setup again."
-        fi
-    else
-        die "MariaDB is not running and mysqld_safe was not found."
-    fi
-fi
+mkdir -p "$PROJECT_DIR/storage/logs"
+DB_LOG="$PROJECT_DIR/storage/logs/watrbx-mysqld.log"
+DB_TEST_LOG="$PROJECT_DIR/storage/logs/watrbx-db-test.log"
 
 printf "\n${BOLD}1. Installation${RESET}\n"
 read -r -p "Installation name [WatrBX]: " INSTALL_NAME
@@ -74,58 +66,128 @@ read -r -p "Database port [3306]: " DB_PORT
 DB_PORT="${DB_PORT:-3306}"
 read -r -p "Database name [watrbx2015]: " DB_NAME
 DB_NAME="${DB_NAME:-watrbx2015}"
-if [[ ! "$DB_NAME" =~ ^[a-zA-Z0-9_]+$ ]]; then
-    die "Invalid database name. Use only letters, numbers, and underscores."
-fi
+[[ "$DB_NAME" =~ ^[a-zA-Z0-9_]+$ ]] || die "Invalid database name. Use only letters, numbers, and underscores."
 read -r -p "Database user [root]: " DB_USER
 DB_USER="${DB_USER:-root}"
 read -r -s -p "Database password [empty]: " DB_PASS
 printf "\n"
 
-# DB_NAME is validated above, so it is safe to use as a MySQL identifier.
+# Test the configured connection first. If it is unavailable, offer to start the local MariaDB server.
+db_test(){
+    if [[ -n "$DB_PASS" ]]; then
+        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e 'SELECT 1' >/dev/null 2>&1
+    else
+        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e 'SELECT 1' >/dev/null 2>&1
+    fi
+}
 
-info "Checking database credentials..."
-if [[ -n "$DB_PASS" ]]; then
-    "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e 'SELECT 1' >/dev/null 2>&1 || die "Could not connect to MariaDB with the supplied credentials."
-else
-    "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e 'SELECT 1' >/dev/null 2>&1 || die "Could not connect to MariaDB with the supplied credentials."
+db_exec(){
+    if [[ -n "$DB_PASS" ]]; then
+        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$@"
+    else
+        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$@"
+    fi
+}
+
+if ! db_test; then
+    warn "MariaDB is not responding on $DB_HOST:$DB_PORT."
+    if command -v mysqld >/dev/null 2>&1 && command -v mysqld_safe >/dev/null 2>&1; then
+        read -r -p "Start MariaDB automatically with mysqld_safe? [Y/n]: " START_DB
+        START_DB="${START_DB:-Y}"
+        if [[ "$START_DB" =~ ^[Yy]$ ]]; then
+            DATADIR="${PREFIX:-$HOME/var/lib/mysql}"
+            if [[ -n "${PREFIX:-}" ]]; then
+                DATADIR="$PREFIX/var/lib/mysql"
+            fi
+            mkdir -p "$DATADIR"
+
+            if [[ ! -d "$DATADIR/mysql" ]]; then
+                info "Initializing MariaDB data directory..."
+                mariadb-install-db --datadir="$DATADIR" >"$DB_LOG" 2>&1 || {
+                    sed -n '1,80p' "$DB_LOG"
+                    die "MariaDB data directory initialization failed."
+                }
+            fi
+
+            info "Starting MariaDB..."
+            mysqld_safe --datadir="$DATADIR" >"$DB_LOG" 2>&1 &
+            DB_PID=$!
+
+            DB_READY=0
+            for _ in {1..30}; do
+                if db_test; then
+                    DB_READY=1
+                    break
+                fi
+                sleep 1
+            done
+
+            if [[ "$DB_READY" != "1" ]]; then
+                printf '\n'
+                sed -n '1,120p' "$DB_LOG" 2>/dev/null || true
+                die "MariaDB failed to start. Full log: $DB_LOG"
+            fi
+            ok "MariaDB started."
+        else
+            die "Start MariaDB first, then run this setup again."
+        fi
+    else
+        die "MariaDB is not running and mysqld_safe was not found."
+    fi
 fi
+
+printf "\n${BOLD}3. Database setup${RESET}\n"
+info "Checking database credentials..."
+db_test || die "Could not connect to MariaDB with the supplied credentials."
 ok "Database credentials work."
 
 read -r -p "Create/import database '$DB_NAME'? [Y/n]: " DO_DB
 DO_DB="${DO_DB:-Y}"
 if [[ "$DO_DB" =~ ^[Yy]$ ]]; then
     info "Creating database if necessary..."
-    if [[ -n "$DB_PASS" ]]; then
-        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        TABLE_COUNT=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME';")
-        if [[ "$TABLE_COUNT" == "0" ]]; then
-            "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < structure.sql
-            ok "structure.sql imported."
-        else
-            warn "Database already contains $TABLE_COUNT table(s). Skipping structure.sql import to avoid overwriting data."
-        fi
+    db_exec -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+    TABLE_COUNT="$(db_exec -N -s -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$(sql_quote "$DB_NAME")';" | tr -d '[:space:]')"
+    if [[ "$TABLE_COUNT" == "0" ]]; then
+        db_exec "$DB_NAME" < "$PROJECT_DIR/structure.sql"
+        ok "structure.sql imported."
     else
-        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        TABLE_COUNT=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME';")
-        if [[ "$TABLE_COUNT" == "0" ]]; then
-            "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" < structure.sql
-            ok "structure.sql imported."
-        else
-            warn "Database already contains $TABLE_COUNT table(s). Skipping structure.sql import to avoid overwriting data."
-        fi
+        warn "Database already contains $TABLE_COUNT table(s). Skipping structure.sql import to avoid overwriting data."
     fi
 fi
 
-printf "\n${BOLD}3. Environment${RESET}\n"
+printf "\n${BOLD}4. Environment${RESET}\n"
 if [[ -f .env ]]; then
     read -r -p ".env already exists. Replace it with the values from this wizard? [y/N]: " REPLACE_ENV
     REPLACE_ENV="${REPLACE_ENV:-N}"
 else
     REPLACE_ENV="Y"
 fi
+
 if [[ "$REPLACE_ENV" =~ ^[Yy]$ ]]; then
-    cp .env.example ".env.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    if [[ -f .env ]]; then
+        cp .env ".env.backup.$(date +%Y%m%d-%H%M%S)"
+    fi
+
+    read -r -p "Use local storage instead of Asteroid? [Y/n]: " USE_LOCAL_STORAGE
+    USE_LOCAL_STORAGE="${USE_LOCAL_STORAGE:-Y}"
+
+    if [[ "$USE_LOCAL_STORAGE" =~ ^[Yy]$ ]]; then
+        LOCAL_STORAGE=true
+        ASSET_CONTAINER_ID="local"
+        CONTAINER_URL=""
+        CONTAINER_PORT=""
+        CONTAINER_ADMIN_KEY=""
+    else
+        LOCAL_STORAGE=false
+        read -r -p "Asteroid container URL: " CONTAINER_URL
+        read -r -p "Asteroid container port [9000]: " CONTAINER_PORT
+        CONTAINER_PORT="${CONTAINER_PORT:-9000}"
+        read -r -s -p "Asteroid admin key: " CONTAINER_ADMIN_KEY
+        printf "\n"
+        read -r -p "Asset container ID: " ASSET_CONTAINER_ID
+    fi
+
     cat > .env <<ENV
 APP_NAME="$(printf '%s' "$INSTALL_NAME" | sed 's/"/\\"/g')"
 APP_DESC="User-generated MMO gaming site for kids, teens, and adults."
@@ -146,16 +208,19 @@ CAN_LOGIN=true
 
 DISCORD_BOT_AUTH=""
 internalwebhook=""
-CONTAINERURL=""
-CONTAINERPORT=""
-CONTAINERADMINKEY=""
+
+LOCAL_STORAGE=$LOCAL_STORAGE
+ASSETCONTAINERID="$(printf '%s' "$ASSET_CONTAINER_ID" | sed 's/"/\\"/g')"
+CONTAINERURL="$(printf '%s' "$CONTAINER_URL" | sed 's/"/\\"/g')"
+CONTAINERPORT="$(printf '%s' "$CONTAINER_PORT" | sed 's/"/\\"/g')"
+CONTAINERADMINKEY="$(printf '%s' "$CONTAINER_ADMIN_KEY" | sed 's/"/\\"/g')"
 
 DB_HOST="$(printf '%s' "$DB_HOST" | sed 's/"/\\"/g')"
 DB_NAME="$(printf '%s' "$DB_NAME" | sed 's/"/\\"/g')"
 DB_USER="$(printf '%s' "$DB_USER" | sed 's/"/\\"/g')"
 DB_PASS="$(printf '%s' "$DB_PASS" | sed 's/"/\\"/g')"
+DB_PORT="$(printf '%s' "$DB_PORT" | sed 's/"/\\"/g')"
 
-# Local development helper. The application may ignore this if unsupported.
 BASE_URL="$(printf '%s' "$BASE_URL" | sed 's/"/\\"/g')"
 ENV
     ok ".env created."
@@ -163,9 +228,11 @@ else
     warn "Keeping the existing .env. Make sure its DB_* values are correct."
 fi
 
-printf "\n${BOLD}4. PrivateNut RSA key${RESET}\n"
+printf "\n${BOLD}5. PrivateNut RSA key${RESET}\n"
 KEY_FILE="$PROJECT_DIR/storage/PrivateNut.pem"
+PUBLIC_KEY_FILE="$PROJECT_DIR/public_key.pem"
 mkdir -p "$PROJECT_DIR/storage"
+
 if [[ -f "$KEY_FILE" ]]; then
     warn "Existing key found: $KEY_FILE"
     read -r -p "Keep this existing key? [Y/n]: " KEEP_KEY
@@ -174,10 +241,12 @@ if [[ -f "$KEY_FILE" ]]; then
         cp "$KEY_FILE" "$KEY_FILE.backup.$(date +%Y%m%d-%H%M%S)"
         read -r -p "RSA key size [2048]: " KEY_BITS
         KEY_BITS="${KEY_BITS:-2048}"
+        [[ "$KEY_BITS" =~ ^(2048|3072|4096)$ ]] || die "Use 2048, 3072, or 4096 bits."
         openssl genrsa -out "$KEY_FILE" "$KEY_BITS" >/dev/null 2>&1
         chmod 600 "$KEY_FILE"
         ok "New PrivateNut.pem generated. Old key was backed up."
     else
+        chmod 600 "$KEY_FILE"
         ok "Keeping existing PrivateNut.pem."
     fi
 else
@@ -188,10 +257,16 @@ else
     chmod 600 "$KEY_FILE"
     ok "Generated $KEY_FILE"
 fi
-openssl rsa -in "$KEY_FILE" -check -noout >/dev/null 2>&1 || die "PrivateNut.pem failed RSA validation."
-ok "PrivateNut.pem is valid."
 
-printf "\n${BOLD}5. First administrator${RESET}\n"
+openssl rsa -in "$KEY_FILE" -check -noout >/dev/null 2>&1 || die "PrivateNut.pem failed RSA validation."
+
+# Always create a matching public key for the generated/private key.
+openssl rsa -in "$KEY_FILE" -pubout -out "$PUBLIC_KEY_FILE" >/dev/null 2>&1
+chmod 644 "$PUBLIC_KEY_FILE"
+ok "PrivateNut.pem is valid."
+ok "Generated matching public_key.pem."
+
+printf "\n${BOLD}6. First administrator${RESET}\n"
 read -r -p "Create/promote an administrator now? [Y/n]: " MAKE_ADMIN
 MAKE_ADMIN="${MAKE_ADMIN:-Y}"
 if [[ "$MAKE_ADMIN" =~ ^[Yy]$ ]]; then
@@ -204,16 +279,16 @@ if [[ "$MAKE_ADMIN" =~ ^[Yy]$ ]]; then
     printf "\n"
     [[ "$ADMIN_PASS" == "$ADMIN_PASS2" ]] || die "Passwords do not match."
 
+    USER_SQL="$(sql_quote "$ADMIN_USER")"
     if [[ -n "$DB_PASS" ]]; then
-        EXISTING_ID=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT id FROM users WHERE username='$(sql_quote "$ADMIN_USER")' LIMIT 1;" || true)
+        EXISTING_ID="$(db_exec -N -s "$DB_NAME" -e "SELECT id FROM users WHERE username='$USER_SQL' LIMIT 1;" || true)"
     else
-        EXISTING_ID=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" -e "SELECT id FROM users WHERE username='$(sql_quote "$ADMIN_USER")' LIMIT 1;" || true)
+        EXISTING_ID="$(db_exec -N -s "$DB_NAME" -e "SELECT id FROM users WHERE username='$USER_SQL' LIMIT 1;" || true)"
     fi
 
-    PASSWORD_HASH=$(ADMIN_PASSWORD="$ADMIN_PASS" php -r 'echo password_hash(getenv("ADMIN_PASSWORD"), PASSWORD_DEFAULT);')
-    REGTIME=$(date +%s)
+    PASSWORD_HASH="$(ADMIN_PASSWORD="$ADMIN_PASS" php -r 'echo password_hash(getenv("ADMIN_PASSWORD"), PASSWORD_DEFAULT);')"
+    REGTIME="$(date +%s)"
     HASH_SQL="$(sql_quote "$PASSWORD_HASH")"
-    USER_SQL="$(sql_quote "$ADMIN_USER")"
 
     if [[ -n "$EXISTING_ID" ]]; then
         info "User already exists with ID $EXISTING_ID. Promoting it to admin and updating its password."
@@ -221,32 +296,27 @@ if [[ "$MAKE_ADMIN" =~ ^[Yy]$ ]]; then
     else
         SQL="INSERT INTO users (username,password,gender,regtime,robux,tix,membership,blurb,is_admin) VALUES ('$USER_SQL','$HASH_SQL',NULL,$REGTIME,100,50,'None','',1);"
     fi
-    if [[ -n "$DB_PASS" ]]; then
-        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "$SQL"
-    else
-        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" -e "$SQL"
-    fi
+    db_exec "$DB_NAME" -e "$SQL"
     ok "Administrator '$ADMIN_USER' is ready."
 fi
 
-printf "\n${BOLD}6. WatrBX directories${RESET}\n"
+printf "\n${BOLD}7. WatrBX directories${RESET}\n"
 for dir in storage/assets storage/thumbnails storage/logs; do
     mkdir -p "$dir"
     ok "Created/checked $dir"
 done
 
-printf "\n${BOLD}7. PHP/project checks${RESET}\n"
+printf "\n${BOLD}8. PHP/project checks${RESET}\n"
 php -l init.php >/dev/null && ok "init.php syntax OK"
 php -l routes/webhandler.php >/dev/null && ok "routes/webhandler.php syntax OK"
 php -l routes/apihandler.php >/dev/null && ok "routes/apihandler.php syntax OK"
 
-# Verify the configured database through PHP/PDO as the application does.
 if [[ -f .env ]]; then
-    if php -r 'require "vendor/autoload.php"; $d=Dotenv\Dotenv::createImmutable(getcwd()); $d->load(); $pdo=new PDO("mysql:host=".$_ENV["DB_HOST"].";dbname=".$_ENV["DB_NAME"].";charset=utf8mb4",$_ENV["DB_USER"],$_ENV["DB_PASS"],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]); echo "DB OK\\n";' >/tmp/watrbx-db-test.txt 2>&1; then
+    if php -r 'require "vendor/autoload.php"; $d=Dotenv\\Dotenv::createImmutable(getcwd()); $d->load(); $pdo=new PDO("mysql:host=".$_ENV["DB_HOST"].";dbname=".$_ENV["DB_NAME"].";charset=utf8mb4",$_ENV["DB_USER"],$_ENV["DB_PASS"],[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]); echo "DB OK\\n";' >"$DB_TEST_LOG" 2>&1; then
         ok "PHP/PDO can connect using .env"
     else
         warn "PHP/PDO database test failed:"
-        sed -n '1,8p' /tmp/watrbx-db-test.txt
+        sed -n '1,8p' "$DB_TEST_LOG" 2>/dev/null || true
     fi
 fi
 
@@ -255,7 +325,7 @@ printf "Project: %s\n" "$PROJECT_DIR"
 printf "URL:     %s\n" "$BASE_URL"
 printf "Database: %s\n" "$DB_NAME"
 printf "Private key: %s\n" "$KEY_FILE"
+printf "Public key:  %s\n" "$PUBLIC_KEY_FILE"
 if [[ "$MAKE_ADMIN" =~ ^[Yy]$ ]]; then printf "Admin:    %s\n" "$ADMIN_USER"; fi
-printf "\nStart the local server with:\n  cd %q\n  php -S 0.0.0.0:8080 -t public router.php\n\n"
+printf "\nStart the local server with:\n  cd %q\n  php -S 0.0.0.0:8080 -t public router.php\n\n" "$PROJECT_DIR"
 printf "Keep storage/PrivateNut.pem private and do not commit it to Git.\n"
-
