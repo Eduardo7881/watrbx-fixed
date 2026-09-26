@@ -146,7 +146,7 @@ if ! db_test; then
             mkdir -p "$DB_DATADIR" "$(dirname "$DB_SOCKET")"
             if [[ ! -d "$DB_DATADIR/mysql" ]]; then
                 info "Initializing MariaDB data directory..."
-                mariadb-install-db --datadir="$DB_DATADIR" >"$DB_LOG" 2>&1 || {
+                mariadb-install-db --datadir="$DB_DATADIR" --auth-root-authentication-method=normal >"$DB_LOG" 2>&1 || {
                     cat "$DB_LOG"
                     die "MariaDB data directory initialization failed."
                 }
