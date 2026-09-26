@@ -74,15 +74,15 @@ read -r -p "Database port [3306]: " DB_PORT
 DB_PORT="${DB_PORT:-3306}"
 read -r -p "Database name [watrbx2015]: " DB_NAME
 DB_NAME="${DB_NAME:-watrbx2015}"
+if [[ ! "$DB_NAME" =~ ^[a-zA-Z0-9_]+$ ]]; then
+    die "Invalid database name. Use only letters, numbers, and underscores."
+fi
 read -r -p "Database user [root]: " DB_USER
 DB_USER="${DB_USER:-root}"
 read -r -s -p "Database password [empty]: " DB_PASS
 printf "\n"
 
-# SQL-safe single quoted string.
-sql_quote(){ printf "%s" "$1" | sed "s/'/''/g"; }
-DB_NAME_SQL="$(sql_quote "$DB_NAME")"
-DB_USER_SQL="$(sql_quote "$DB_USER")"
+# DB_NAME is validated above, so it is safe to use as a MySQL identifier.
 
 info "Checking database credentials..."
 if [[ -n "$DB_PASS" ]]; then
@@ -97,8 +97,8 @@ DO_DB="${DO_DB:-Y}"
 if [[ "$DO_DB" =~ ^[Yy]$ ]]; then
     info "Creating database if necessary..."
     if [[ -n "$DB_PASS" ]]; then
-        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME_SQL\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        TABLE_COUNT=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME_SQL';")
+        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        TABLE_COUNT=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME';")
         if [[ "$TABLE_COUNT" == "0" ]]; then
             "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < structure.sql
             ok "structure.sql imported."
@@ -106,8 +106,8 @@ if [[ "$DO_DB" =~ ^[Yy]$ ]]; then
             warn "Database already contains $TABLE_COUNT table(s). Skipping structure.sql import to avoid overwriting data."
         fi
     else
-        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "CREATE DATABASE IF NOT EXISTS \\`$DB_NAME_SQL\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        TABLE_COUNT=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME_SQL';")
+        "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+        TABLE_COUNT=$("$DBCLI" -N -s -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME';")
         if [[ "$TABLE_COUNT" == "0" ]]; then
             "$DBCLI" -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" < structure.sql
             ok "structure.sql imported."
